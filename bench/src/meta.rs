@@ -222,6 +222,11 @@ pub fn collect(info: &RunInfo) -> Value {
             "ijson": git_info(&ws.join("ijson"), None, false),
             "RedisJSON": git_info(&ws.join("RedisJSON"), None, false),
         },
+        "built_from": {
+            "ijson_rev": env!("BENCH_IJSON_REV"),
+            "ijson_diff": env!("BENCH_IJSON_DIFF"),
+            "cargo_lock_hash": env!("BENCH_LOCK_HASH"),
+        },
         "params": info.params.map(|p| json!({
             "min_repeat": p.min_repeat,
             "min_time_ns": p.min_time_ns as u64,

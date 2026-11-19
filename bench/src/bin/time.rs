@@ -16,6 +16,8 @@ fn main() -> ExitCode {
     let mut case_filter: Option<String> = None;
     let mut groups: Vec<String> = Vec::new();
     let mut csv: Option<PathBuf> = None;
+    let mut plan_in: Option<PathBuf> = None;
+    let mut plan_out: Option<PathBuf> = None;
     let mut dir = default_fixture_dir();
     let mut pin: Option<usize> = None;
     let mut use_counters = true;
@@ -29,6 +31,8 @@ fn main() -> ExitCode {
             "--csv" => csv = args.next().map(PathBuf::from),
             "--fixtures" => dir = args.next().map(PathBuf::from).expect("--fixtures DIR"),
             "--no-counters" => use_counters = false,
+            "--plan-in" => plan_in = args.next().map(PathBuf::from),
+            "--plan-out" => plan_out = args.next().map(PathBuf::from),
             "--pin" => match args.next().and_then(|v| v.parse().ok()) {
                 Some(cpu) => pin = Some(cpu),
                 None => {
@@ -121,10 +125,24 @@ fn main() -> ExitCode {
     }
 
     let mut report = Report::new(csv.as_deref());
-    let mut ctx = Ctx { fixtures: &fixtures, params, report: &mut report, case_filter };
+    let plan_in = match plan_in.as_deref().map(json_bench::ctx::read_plan) {
+        Some(Err(e)) => {
+            eprintln!("cannot read plan: {e}");
+            return ExitCode::from(2);
+        }
+        Some(Ok(p)) => Some(p),
+        None => None,
+    };
+    let mut ctx = Ctx { fixtures: &fixtures, params, report: &mut report, case_filter, plan_in, plan_used: Vec::new() };
     for (name, run) in groups::ALL {
         if groups.is_empty() || groups.iter().any(|g| g == name) {
             run(&mut ctx);
+        }
+    }
+    if let Some(p) = plan_out {
+        if let Err(e) = ctx.write_plan(&p) {
+            eprintln!("cannot write plan: {e}");
+            return ExitCode::FAILURE;
         }
     }
     ExitCode::SUCCESS

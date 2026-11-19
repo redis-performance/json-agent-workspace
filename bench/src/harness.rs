@@ -47,6 +47,16 @@ impl Params {
     }
 }
 
+/// A row's batch size and sample count, fixed in advance. Both change what a
+/// row measures (the share of each batch that sees cold state, how many
+/// results are alive, how much bracketing cost each operation carries), so a
+/// comparison is only valid when both sides ran the same plan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Plan {
+    pub inner: usize,
+    pub n: usize,
+}
+
 /// Per-operation results, one entry per timed sample.
 pub struct Samples {
     pub inner: usize,
@@ -135,43 +145,59 @@ fn sample<R, F: FnMut() -> R>(f: &mut F, inner: usize, keep: &mut Vec<R>, ctr: O
 }
 
 /// Calibrate, warm up and measure, given a function that times one sample of
-/// a given batch size.
-fn drive(p: Params, max_inner: usize, fixed_inner: Option<usize>, counting: bool, mut s: impl FnMut(usize) -> Timed) -> Samples {
-    // Calibrate the batch size from a few single calls.
-    let inner = fixed_inner.unwrap_or_else(|| {
-        let mut one = u128::MAX;
-        for _ in 0..3 {
-            one = one.min(s(1).ns).max(1);
-        }
-        ((p.min_sample_ns / one) as usize).clamp(1, max_inner)
-    });
-
-    // Warm-up: grow the repeat count until the warm-up has lasted long enough.
-    // `row_start` covers setup and drop too, which `warm_total` does not see.
+/// a given batch size. With a `plan`, nothing is calibrated: the batch size
+/// and sample count are exactly the plan's.
+fn drive(p: Params, max_inner: usize, plan: Option<Plan>, counting: bool, mut s: impl FnMut(usize) -> Timed) -> Samples {
     let row_start = Instant::now();
-    let mut n = p.min_repeat;
-    let mut warm_total: u128 = 0;
-    let mut i = 0;
-    while i < n {
-        warm_total += s(inner).ns;
-        if i + 1 == n && warm_total < p.min_time_ns && n < p.max_repeat {
-            // Growing tenfold and then measuring as many samples again costs
-            // about twenty times what has been spent so far.
-            let spent = row_start.elapsed().as_nanos();
-            if spent.saturating_mul(20) <= p.max_row_ns {
-                n = n.saturating_mul(10).min(p.max_repeat);
+    let (inner, n) = match plan {
+        Some(pl) => {
+            // Warm up for as many samples as will be measured, within the budget.
+            for _ in 0..pl.n {
+                s(pl.inner);
+                if row_start.elapsed().as_nanos() > p.max_row_ns {
+                    break;
+                }
             }
+            (pl.inner, pl.n)
         }
-        i += 1;
-    }
+        None => {
+            // Calibrate by doubling the batch until one measured sample is long
+            // enough. A single call is not timed on its own: for a fast
+            // operation that would measure the clock, not the operation.
+            let mut inner = 1usize;
+            loop {
+                let t = s(inner).ns.min(s(inner).ns);
+                if t >= p.min_sample_ns || inner >= max_inner {
+                    break;
+                }
+                inner = (inner * 2).min(max_inner);
+            }
+            // Warm-up: grow the repeat count until the warm-up has lasted long
+            // enough. `row_start` covers setup and drop too, which `warm_total`
+            // does not see.
+            let mut n = p.min_repeat;
+            let mut warm_total: u128 = 0;
+            let mut i = 0;
+            while i < n {
+                warm_total += s(inner).ns;
+                if i + 1 == n && warm_total < p.min_time_ns && n < p.max_repeat {
+                    // Growing tenfold and then measuring as many samples again
+                    // costs about twenty times what has been spent so far.
+                    let spent = row_start.elapsed().as_nanos();
+                    if spent.saturating_mul(20) <= p.max_row_ns {
+                        n = n.saturating_mul(10).min(p.max_repeat);
+                    }
+                }
+                i += 1;
+            }
+            (inner, n)
+        }
+    };
 
-    // Measurement: n samples, all kept.
+    // Measurement: exactly n samples, all kept.
     let mut ns_per_op = Vec::with_capacity(n);
     let mut ctrs = Vec::with_capacity(if counting { n } else { 0 });
-    for k in 0..n {
-        if k >= p.min_repeat && row_start.elapsed().as_nanos() > p.max_row_ns.saturating_mul(2) {
-            break;
-        }
+    for _ in 0..n {
         let t = s(inner);
         ns_per_op.push(t.ns as f64 / inner as f64);
         if counting {
@@ -187,11 +213,11 @@ fn drive(p: Params, max_inner: usize, fixed_inner: Option<usize>, counting: bool
 }
 
 /// Run `f` under the harness and return every sample.
-pub fn bench<R, F: FnMut() -> R>(mut f: F, p: Params) -> Samples {
+pub fn bench<R, F: FnMut() -> R>(mut f: F, p: Params, plan: Option<Plan>) -> Samples {
     let mut keep: Vec<R> = Vec::new();
     let ctr = counters::current();
     let ctr = ctr.as_deref();
-    drive(p, 1 << 20, None, ctr.is_some(), |inner| sample(&mut f, inner, &mut keep, ctr))
+    drive(p, 1 << 20, plan, ctr.is_some(), |inner| sample(&mut f, inner, &mut keep, ctr))
 }
 
 /// Cost of the harness itself: an empty routine, one call per sample, through
@@ -204,7 +230,7 @@ pub fn overhead() -> Samples {
     let ctr = counters::current();
     let ctr = ctr.as_deref();
     let p = Params { min_repeat: 2_000, min_time_ns: 0, max_repeat: 2_000, min_sample_ns: 0, max_row_ns: u128::MAX };
-    drive(p, 1, Some(1), ctr.is_some(), |inner| sample(&mut f, inner, &mut keep, ctr))
+    drive(p, 1, Some(Plan { inner: 1, n: 2_000 }), ctr.is_some(), |inner| sample(&mut f, inner, &mut keep, ctr))
 }
 
 /// Time one sample of `inner` calls of `routine`, each on its own state built
@@ -247,12 +273,13 @@ pub fn bench_with_setup<S, R>(
     mut setup: impl FnMut() -> S,
     mut routine: impl FnMut(&mut S) -> R,
     p: Params,
+    plan: Option<Plan>,
 ) -> Samples {
     let mut states: Vec<S> = Vec::new();
     let mut keep: Vec<R> = Vec::new();
     let ctr = counters::current();
     let ctr = ctr.as_deref();
-    drive(p, 1 << 16, None, ctr.is_some(), |inner| {
+    drive(p, 1 << 16, plan, ctr.is_some(), |inner| {
         sample_with_setup(&mut setup, &mut routine, inner, &mut states, &mut keep, ctr)
     })
 }
