@@ -23,7 +23,7 @@ and the dependencies it builds on.
 
 ```bash
 git clone --recurse-submodules https://github.com/redis-performance/json-agent-workspace.git
-cd json-agent-workspace/ijson && cargo test
+cd json-agent-workspace/ijson && cargo test --lib -- --test-threads=1
 ```
 
 ## Next steps

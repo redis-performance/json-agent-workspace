@@ -84,6 +84,9 @@ Reports written before this rule are not rewritten.
   commit, toolchain (`ijson/rust-toolchain.toml`), flags, allocator and machine.
 - Build `ijson` with the features RedisJSON uses (`default-features = false`; `thread_safe`
   only when measuring that configuration) and say which.
+- Run `ijson`'s unit tests single-threaded: `cargo test --lib -- --test-threads=1`. Run in
+  parallel they crash or fail in both the default and `thread_safe` builds (observed 2026-11-19
+  at `379dadf`; not yet root-caused, the tests share the global string cache).
 - Report memory as well as time. `ijson` exists to save memory; a speedup that grows the
   per-value or per-document footprint is a trade-off to declare before running, not after.
 - Preserve behaviour RedisJSON depends on: number formatting, typed-array tagging and
