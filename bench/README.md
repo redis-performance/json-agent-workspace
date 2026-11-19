@@ -3,116 +3,129 @@
 Measures `ijson` on the call paths RedisJSON uses ([docs/USAGE-PATTERN.md](../docs/USAGE-PATTERN.md)),
 with `serde_json::Value` as the baseline in the same binary.
 
-**Status: first slice, not frozen.** Parse and serialise only. It is not yet the referee
-that `AGENTS.md` requires; see "Not built yet".
+**Status: complete enough to use, not frozen.** Every call path has a group, but the suite has
+only been smoke-run on a noisy laptop, and the limits under "Known limits" are open. Do not
+accept or reject an optimisation on it until those marked *blocking* are closed and a baseline
+exists on a dedicated machine.
 
 ## Run
 
 ```bash
 cd bench
 cargo build --release
-./target/release/time --csv ../scratch/time.csv   # timing, a few minutes
-./target/release/time --quick                     # smoke test only, never for reporting
-./target/release/time --pin 2 --csv ../scratch/time.csv   # pinned to CPU 2
-./target/release/mem --csv ../scratch/mem.csv     # heap cost of parse and clone
+cargo test --release -- --test-threads=1             # generator tests; ijson's string cache is not thread-safe
+
+./target/release/time --list                         # groups
+./target/release/time --quick --pin 2                # smoke test only, never for reporting
+./target/release/mem                                 # heap cost of parse and clone
+
+# A reportable measurement: several invocations, one fixed plan.
+scripts/bench.py run --bin ./target/release/time --out ../scratch/base --runs 6 -- --pin 2
+
+# Comparing two builds of ijson: interleaved A B B A, then a verdict per row.
+scripts/bench.py ab --base PATH/TO/base/time --cand PATH/TO/cand/time --out ../scratch/ab --rounds 3 -- --pin 2
+scripts/bench.py compare ../scratch/ab/base ../scratch/ab/cand
+scripts/bench.py compare ../scratch/ab/base ../scratch/ab/cand --metric instructions
 ```
 
-Both binaries take `--filter SUBSTR` to select fixtures, `--fixtures DIR` to point elsewhere and
-`--csv PATH`. `time` also takes `--group NAME`, `--case SUBSTR`, `--list`, `--pin CPU`
-(`sched_setaffinity` for the benchmark thread, before fixtures are loaded) and `--no-counters`.
+`time` flags: `--group NAME` (repeatable), `--filter SUBSTR` (datasets), `--case SUBSTR` (rows),
+`--pin CPU`, `--no-counters`, `--csv PATH`, `--plan-out PATH` / `--plan-in PATH`, `--fixtures DIR`,
+`--quick`.
 
-## What is measured
+## Groups
 
-| Group | ijson path | Mirrors |
+| Group | What it measures | RedisJSON path it mirrors |
 |---|---|---|
-| `parse` | `IValueDeserSeed::new(None).deserialize_compact_objects` over a `serde_json::Deserializer`, recursion limit on | `JSON.SET`: `redis_json/src/ivalue_manager.rs`, `from_str` with default arguments |
-| `serialize` | `serde_json::to_string(&IValue)` | `JSON.GET` default format: `redis_json/src/key_value.rs`, `serialize_object` |
-| `mem` | allocator calls, peak bytes and retained bytes for parse and for clone | the memory side of both |
+| `parse` | text to value; datasets, synthetic documents, and warm / keys-warm / cold string-cache variants | `JSON.SET`: `ivalue_manager.rs` `from_str` |
+| `serialize` | value to text, default format | `JSON.GET`: `key_value.rs` `serialize_object` |
+| `lookup` | object key hit/miss, array index, deep path, iteration, scalar reads; hot (one document) and cold (working set larger than cache) | `json_path/src/json_node.rs`, `impl SelectValue for IValue` |
+| `mutate` | object insert/overwrite/remove, array push/insert/pop/trim, number increment, string append, nested set, build by insertion | `ivalue_manager.rs` write paths |
+| `typed_array` | homogeneous numeric arrays per width: parse, read, sum, push, extend, widening, retagging | `ivalue_manager.rs`, `commands.rs` (FPHA) |
+| `clone_drop` | clone and drop of documents, subtrees and scalars | `ivalue_manager.rs` `clone_value`, `commands.rs` |
+| `cbor` | plain, self-contained and stream encode/decode, against the JSON text round trip | `rdb_persistence.rs` |
 
-Fixtures are RedisJSON's own datasets, read from `RedisJSON/tests/benchmarks/datasets` in the
-pinned submodule. Before anything is timed, every fixture is parsed by both implementations,
-and the `ijson` value is serialised and read back; a mismatch aborts the run.
+Each group's module doc names the exact call sites. Datasets are RedisJSON's own, read from
+`RedisJSON/tests/benchmarks/datasets` in the pinned submodule; synthetic documents come from the
+seeded generator in `src/synth.rs`. Every case is checked against the baseline (or round-tripped)
+before it is timed, and a mismatch aborts the run.
 
-## How timing works
+## How a row is measured
 
-The loop follows Daniel Lemire's [`rustquadsimd`](https://github.com/lemire/rustquadsimd)
-harness: warm up until 0.4 s has passed, growing the repeat count tenfold, then time that many
-samples. Three deliberate differences:
+The loop follows Daniel Lemire's [`rustquadsimd`](https://github.com/lemire/rustquadsimd) harness:
+warm up, then time N samples. What differs:
 
-- **Every sample is written to the CSV**, one row each, so noise can be judged. The table
-  prints the minimum and the median, plus two dispersion figures per row: `mad%` (median
-  absolute deviation over the median) and `p10-90%` (p90 minus p10 over the median).
-- **Short operations are batched** so one timed sample lasts at least 50 µs; the `inner`
-  column records the batch size.
-- **Results are kept alive until the clock stops**, so dropping the value is not part of
-  `parse` or `serialize`. Drop gets its own group later.
+- **Every sample is kept** and written to the CSV. The table prints min, median, MAD and the
+  p10-p90 spread. `compare` uses the per-invocation median; the minimum is for reading, not deciding.
+- **Short operations are batched.** The batch (`inner`) is found by doubling until one measured
+  sample reaches 50 µs.
+- **Batch size and sample count are a saved plan.** Both change what a row measures (the share
+  of a batch that sees cold state, how many results are alive, how much bracketing cost each
+  operation carries). The first invocation calibrates and writes the plan; later ones replay it.
+  `compare` refuses rows whose batch size differs between the sides.
+- **Results are kept alive until the clock stops**, so dropping them is not timed. Operations
+  that change their input get a fresh state per call, built outside the timed region.
+- **Each row has a wall-clock budget** (10 s; warm-up stops growing beyond it), so rows with
+  slow setup cannot run for minutes.
+- **Hardware counters** (Linux): instructions, cycles, branches, branch misses, cache misses and
+  references per operation, user space only, for the benchmark thread, bracketing exactly the
+  timed region. If they cannot be opened the run continues on wall-clock and says so once; missing
+  values are empty, never zero. On hybrid CPUs each sample is attributed to the core type it ran
+  on (`pmu` column); do not mix core types in a comparison.
+- **Harness overhead** (an empty routine through the same path) is printed and recorded, not subtracted.
 
-## Hardware counters (Linux)
+## What is recorded
 
-Each timed sample also reads instructions, cycles, branches, branch misses, cache misses and
-cache references for the benchmark thread, user space only (`exclude_kernel`, `exclude_hv`),
-through `perf_event_open` (`src/counters.rs`, a direct `libc` wrapper).
+Next to each CSV, `<csv>.meta.json`: time, toolchain, target, profile, the `ijson` revision and
+diff hash the binary was **built** from, lockfile hash, workspace revisions, harness parameters,
+CPU model and topology, the pinned CPU, governor, frequency, turbo and SMT state, kernel,
+`perf_event_paranoid`, counter availability and harness overhead. Unknown values are null. No
+hostname, user name or path is written. The binary and its stderr do contain absolute paths, so
+publish CSVs and sidecars only.
 
-- The events form one group per PMU, so they are read atomically. The group is enabled just
-  before the clock starts and disabled just after it stops: setup, drop and the read itself
-  are outside. There is no counter syscall inside the per-call loop.
-- If the kernel multiplexed the group, values are scaled by `time_enabled / time_running`
-  and the sample's `scaled` CSV column is 1.
-- Table columns `ins/op`, `cyc/op`, `brmiss/op`, `cmiss/op` are medians over the counted
-  samples; `IPC` is the ratio of the first two. CSV columns: `instructions, cycles, branches,
-  branch_misses, cache_misses, cache_refs` (per operation), `pmu`, `scaled`.
-- **Degrading.** If counters cannot be opened (not Linux, `perf_event_paranoid` too high,
-  no PMU in a VM), or open but fail a start-up self-test, the run continues on wall-clock
-  time and prints one `counters: OFF, ...` line on stderr with the reason. Absent values are
-  empty in the CSV and `-` in the table; nothing is zero-filled. A single event that cannot
-  join the group is absent on its own and named in the status line.
-- **Hybrid CPUs** (Intel `cpu_core` + `cpu_atom`). Each core type has its own PMU and an
-  event counts on one of them only. The harness opens one group on each PMU (the kernel's
-  extended hardware-event encoding, PMU type in the high half of `config`) and attributes a
-  sample to the one that ran; the `pmu` column says which. If the thread changed core type
-  inside a sample the two parts are added and `pmu` is `mixed`. Instructions per operation
-  are comparable across core types; cycles, IPC and miss counts are not, so pin the run and
-  never mix `pmu` values in one comparison. Checked on a hybrid machine with the thread
-  pinned to a P core and to an E core, and unpinned: both PMUs count. The non-Linux and
-  counters-refused paths have not been exercised on a real machine.
-- **Harness overhead.** At start-up an empty routine is run through the same sampling
-  function, one call per sample. Its time and instruction count are printed on stderr and
-  written to the metadata. That is the fixed cost of one sample's bracketing; a row carries
-  it divided by its `inner`. It is reported, never subtracted.
+The run warns when it is not pinned, the governor is not `performance`, turbo is on or SMT is
+active. Any of those makes timings non-reportable. Instruction counts are far more stable than
+time and are the better first signal on a shared machine.
 
-## Run metadata and hygiene
+## How `compare` decides
 
-With `--csv PATH`, both binaries write `PATH.meta.json` (`src/meta.rs`), and print a one-line
-summary on stderr: UTC timestamp; rustc version, target, profile, opt level (captured at build
-time by `build.rs`); the `ijson` dependency line from `Cargo.toml`; allocator; git revision
-and dirty flag of the workspace (dirtiness judged on `bench/`), `ijson` and `RedisJSON`
-(tracked files); harness parameters; CPU model, logical and physical core counts, P/E CPU
-lists, the CPU the thread is on and its core type, its affinity mask, governor, current/min/max
-frequency, turbo and SMT state; kernel version and `perf_event_paranoid`; counter status;
-harness overhead. Unreadable values are `null`. No host name, user name, address or path.
+Per row it takes the median of each invocation, then runs a permutation test on those medians.
+It reports `LOWER` or `HIGHER` only if the test rejects "no difference" at `--alpha` (0.05) **and**
+the change is at least `--threshold` (1%). It needs four or more invocations per side, refuses to
+compare runs whose parameters or pinning differ, and prints how far the baseline (`serde`) rows
+moved: they cannot change when only `ijson` changes, so that figure is the drift floor. Rows are
+tested one by one; with hundreds of rows a few will cross the line by chance.
 
-`time` prints a `WARNING` on stderr, and keeps going, when the thread is not pinned to one
-CPU, the governor is not `performance`, turbo is on, or SMT is active (or any of these cannot
-be read). A run with warnings is not reportable.
+## Known limits
 
-## Read the numbers with these in mind
+Blocking before this can referee a decision:
 
-- **Warm string cache.** `ijson` interns strings in a process-wide cache. Parsing the same
-  document repeatedly measures parsing with those strings already interned. A cold-cache
-  variant is not built yet.
-- **System allocator.** RedisJSON runs on Redis's allocator; these binaries use the system
-  one. Absolute numbers and allocation-heavy comparisons will differ in production.
-- **Same build as RedisJSON**: its `serde_json` version constraint, `ijson` without default
-  features and without `thread_safe`, its release profile (no LTO), the toolchain in
-  `rust-toolchain.toml`.
-- **`mem` retained bytes for `ijson` include newly interned strings**, and `clone` shares them.
-- Run on a quiet, pinned core of a dedicated machine before quoting anything, and publish the
-  `.meta.json` with the result. SMT is reported system-wide; whether the pinned core's sibling
-  is idle is not checked.
+1. **Not run on a dedicated machine.** No baseline exists. A full invocation has about 770 rows
+   and is expected to take tens of minutes; that has not been measured.
+2. **System allocator.** RedisJSON runs on Redis's allocator. `ijson`'s design trades allocation
+   count and size, which is exactly where allocators differ, so results on allocation-heavy rows
+   (parse, clone, drop, CBOR encode, mutation) need confirming under jemalloc. Not built.
+3. **The string-intern table is small and hot.** In Redis it holds strings for the whole keyspace,
+   so an intern or a last-owner drop is likely a cache miss; here it holds one document. A change
+   that adds or removes intern lookups would be mis-scored. A pre-populated-cache variant is not built.
+4. **`ijson` always runs before the baseline** in a process, so the baseline inherits its heap layout.
+5. **Transitive dependency versions differ from RedisJSON's lockfile** (`itoa`, `memchr`, `serde`,
+   `smallvec`, `indexmap`, `zstd`), and `ijson`'s `ciborium` dependency tracks a branch. The
+   `serde_json` version, `ijson` revision, toolchain and release profile do match.
 
-## Not built yet
+Other limits:
 
-1. Groups for lookup and traversal (hot and cold), in-place mutation, typed arrays,
-   clone/drop timing, CBOR stream, defrag.
-2. Seeded synthetic documents for sizes and shapes the datasets do not cover.
-3. A cold string-cache variant of `parse`.
+- Wall time includes kernel time; counters do not. Page faults and system time per row are not recorded.
+- For small documents several parses share a batch, so only the first sees an empty string cache;
+  large documents (one per sample) always do. The `-warmstr` / `-keywarm-coldstr` / `-coldstr`
+  synthetic rows control this explicitly; the dataset rows do not.
+- A last-owner drop cannot be isolated for small documents, for the same reason.
+- Cold lookup sets hold the same number of documents for both implementations, not the same bytes.
+- Verification rejects floats with large exponents, because `serde_json` as RedisJSON builds it
+  (no `float_roundtrip`) can be one unit in the last place off. Synthetic documents avoid them.
+- `mem` charges lazily initialised state to whichever fixture triggers it, and counts requested
+  bytes, not allocator size classes.
+- Rows where setup costs far more than the operation (large-array mutation) are slow and have few samples.
+- Not covered: `JSON.GET` with a `$` path (serialises a wrapper), `JSON.MERGE`, toggle/multiply/power,
+  F16/BF16 and unsigned typed arrays, CBOR dictionary reset and budget exhaustion, defrag.
+- Metadata does not record command-line arguments, `RUSTFLAGS`, libc version or THP setting, and
+  its `lto` and `allocator` fields are fixed strings.

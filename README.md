@@ -4,7 +4,7 @@ Agent workspace for optimising the data structure underneath
 [RedisJSON](https://github.com/RedisJSON/RedisJSON): [`ijson`](https://github.com/RedisJSON/ijson)
 and the dependencies it builds on.
 
-**Status: early.** A first microbenchmark slice exists in [`bench/`](bench/README.md) (parse, serialise, memory). It is not frozen, and no baseline or experiment exists yet.
+**Status: early.** The microbenchmark suite in [`bench/`](bench/README.md) covers every call path in `docs/USAGE-PATTERN.md`, with hardware counters and an A/B comparison driver. It is not frozen and no baseline or experiment exists yet.
 
 ## Layout
 
@@ -30,5 +30,5 @@ cd json-agent-workspace/ijson && cargo test --lib -- --test-threads=1
 ## Next steps
 
 1. Profile RedisJSON command workloads to weight the call paths in `docs/USAGE-PATTERN.md`.
-2. Finish and freeze the `ijson` microbenchmark suite in `bench/` (remaining groups and hardware counters are listed in its README).
+2. Close the blocking limits listed in `bench/README.md`, then freeze the suite.
 3. Record a baseline (time and memory) per architecture, then start experiments.
