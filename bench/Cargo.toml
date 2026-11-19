@@ -1,0 +1,21 @@
+[package]
+name = "json-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Microbenchmark referee for ijson, mirroring RedisJSON's call paths"
+
+# Standalone: not a member of the ijson workspace.
+[workspace]
+
+[dependencies]
+# Same feature set RedisJSON uses for ijson (default-features = false, no thread_safe).
+ijson = { path = "../ijson", default-features = false }
+# Same constraint and feature as RedisJSON's workspace manifest.
+serde_json = { version = ">=1.0.0, <1.0.147", features = ["unbounded_depth"] }
+serde = "1"
+
+# Same release profile as RedisJSON (no LTO, default codegen units). LTO is a
+# separate experiment, not the baseline.
+[profile.release]
+debug = 1
