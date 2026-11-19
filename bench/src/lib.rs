@@ -1,11 +1,13 @@
 //! Microbenchmark referee for `ijson`, mirroring RedisJSON's call paths.
 //! See `bench/README.md`.
 
+pub mod counters;
 pub mod counting_alloc;
 pub mod ctx;
 pub mod fixtures;
 pub mod groups;
 pub mod harness;
+pub mod meta;
 pub mod ops;
 pub mod report;
 pub mod synth;

@@ -15,6 +15,10 @@ ijson = { path = "../ijson", default-features = false }
 serde_json = { version = ">=1.0.0, <1.0.147", features = ["unbounded_depth"] }
 serde = "1"
 
+# perf_event_open and sched_{get,set}affinity. Already in the tree through ijson.
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+
 # Same release profile as RedisJSON (no LTO, default codegen units). LTO is a
 # separate experiment, not the baseline.
 [profile.release]
