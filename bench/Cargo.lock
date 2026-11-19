@@ -210,6 +210,7 @@ name = "json-bench"
 version = "0.1.0"
 dependencies = [
  "ijson",
+ "libc",
  "serde",
  "serde_json",
 ]
