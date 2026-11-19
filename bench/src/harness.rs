@@ -15,6 +15,11 @@ pub struct Params {
     /// A single timed sample covers at least this long; short operations are
     /// batched so the timer's own cost stays small next to the work.
     pub min_sample_ns: u128,
+    /// Wall-clock budget for one row, setup included. The repeat count stops
+    /// growing once reaching the next size would exceed it, and measurement
+    /// stops early (never below `min_repeat` samples) at twice this. It bounds
+    /// run time for rows with slow setup; it does not change how a sample is timed.
+    pub max_row_ns: u128,
 }
 
 impl Default for Params {
@@ -24,6 +29,7 @@ impl Default for Params {
             min_time_ns: 400_000_000,
             max_repeat: 100_000,
             min_sample_ns: 50_000,
+            max_row_ns: 10_000_000_000,
         }
     }
 }
@@ -36,6 +42,7 @@ impl Params {
             min_time_ns: 20_000_000,
             max_repeat: 1_000,
             min_sample_ns: 20_000,
+            max_row_ns: 500_000_000,
         }
     }
 }
@@ -140,13 +147,20 @@ fn drive(p: Params, max_inner: usize, fixed_inner: Option<usize>, counting: bool
     });
 
     // Warm-up: grow the repeat count until the warm-up has lasted long enough.
+    // `row_start` covers setup and drop too, which `warm_total` does not see.
+    let row_start = Instant::now();
     let mut n = p.min_repeat;
     let mut warm_total: u128 = 0;
     let mut i = 0;
     while i < n {
         warm_total += s(inner).ns;
         if i + 1 == n && warm_total < p.min_time_ns && n < p.max_repeat {
-            n = n.saturating_mul(10).min(p.max_repeat);
+            // Growing tenfold and then measuring as many samples again costs
+            // about twenty times what has been spent so far.
+            let spent = row_start.elapsed().as_nanos();
+            if spent.saturating_mul(20) <= p.max_row_ns {
+                n = n.saturating_mul(10).min(p.max_repeat);
+            }
         }
         i += 1;
     }
@@ -154,7 +168,10 @@ fn drive(p: Params, max_inner: usize, fixed_inner: Option<usize>, counting: bool
     // Measurement: n samples, all kept.
     let mut ns_per_op = Vec::with_capacity(n);
     let mut ctrs = Vec::with_capacity(if counting { n } else { 0 });
-    for _ in 0..n {
+    for k in 0..n {
+        if k >= p.min_repeat && row_start.elapsed().as_nanos() > p.max_row_ns.saturating_mul(2) {
+            break;
+        }
         let t = s(inner);
         ns_per_op.push(t.ns as f64 / inner as f64);
         if counting {
@@ -186,7 +203,7 @@ pub fn overhead() -> Samples {
     let mut f = || black_box(0u64);
     let ctr = counters::current();
     let ctr = ctr.as_deref();
-    let p = Params { min_repeat: 2_000, min_time_ns: 0, max_repeat: 2_000, min_sample_ns: 0 };
+    let p = Params { min_repeat: 2_000, min_time_ns: 0, max_repeat: 2_000, min_sample_ns: 0, max_row_ns: u128::MAX };
     drive(p, 1, Some(1), ctr.is_some(), |inner| sample(&mut f, inner, &mut keep, ctr))
 }
 

@@ -60,6 +60,7 @@ def load(path, metric):
     if not files:
         sys.exit(f"no CSV files in {path}")
     out = {}
+    pmus = set()
     for f in files:
         per = {}
         with open(f, newline="") as fh:
@@ -67,13 +68,15 @@ def load(path, metric):
             if metric not in (rd.fieldnames or []):
                 sys.exit(f"{f}: no column {metric!r}; columns are {rd.fieldnames}")
             for row in rd:
+                if row.get("pmu"):
+                    pmus.add(row["pmu"])
                 v = row[metric]
                 if v == "":
                     continue  # metric not available for this sample (e.g. counters off)
                 per.setdefault((row["group"], row["case"], row["impl"]), []).append(float(v))
         for k, vals in per.items():
             out.setdefault(k, []).append(statistics.median(vals))
-    return out, len(files)
+    return out, len(files), pmus
 
 
 def spread(xs):
@@ -83,8 +86,11 @@ def spread(xs):
 
 
 def cmd_compare(a):
-    base, nb = load(a.base, a.metric)
-    cand, nc = load(a.cand, a.metric)
+    base, nb, pb = load(a.base, a.metric)
+    cand, nc, pc = load(a.cand, a.metric)
+    if len(pb | pc) > 1:
+        print(f"WARNING: samples come from more than one core type (base {sorted(pb)}, cand {sorted(pc)}); "
+              "cycles and time are not comparable across core types. Pin both sides to the same CPU.")
     print(f"metric: {a.metric}; invocations: base {nb}, cand {nc}; threshold {a.threshold}%")
     if min(nb, nc) < 3:
         print("WARNING: fewer than 3 invocations per side; run-to-run noise cannot be judged, verdicts are unreliable.")

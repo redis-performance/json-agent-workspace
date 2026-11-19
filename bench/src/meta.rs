@@ -227,6 +227,7 @@ pub fn collect(info: &RunInfo) -> Value {
             "min_time_ns": p.min_time_ns as u64,
             "max_repeat": p.max_repeat,
             "min_sample_ns": p.min_sample_ns as u64,
+            "max_row_ns": p.max_row_ns as u64,
         })),
         "cpu": cpu_info(cpu, affinity.as_ref()),
         "pin": { "requested": info.pinned, "pinned_to": pinned_to },
