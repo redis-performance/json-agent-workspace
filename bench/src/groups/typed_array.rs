@@ -185,6 +185,23 @@ fn case<AI, RI, AS, RS>(
     ctx: &mut Ctx,
     name: &str,
     k: usize,
+    si: impl FnMut() -> (IValue, AI),
+    oi: impl FnMut(&mut (IValue, AI)) -> RI,
+    ss: impl FnMut() -> (Value, AS),
+    os: impl FnMut(&mut (Value, AS)) -> RS,
+) {
+    case_opt(ctx, name, k, true, si, oi, ss, os)
+}
+
+/// As [`case`]; with `time_serde` false the baseline is verified but not
+/// timed. For a constant-time baseline operation on a large document, where
+/// the harness would build thousands of copies per sample.
+#[allow(clippy::too_many_arguments)]
+fn case_opt<AI, RI, AS, RS>(
+    ctx: &mut Ctx,
+    name: &str,
+    k: usize,
+    time_serde: bool,
     mut si: impl FnMut() -> (IValue, AI),
     mut oi: impl FnMut(&mut (IValue, AI)) -> RI,
     mut ss: impl FnMut() -> (Value, AS),
@@ -196,7 +213,9 @@ fn case<AI, RI, AS, RS>(
         same(name, &a.0, &b.0);
     }
     ctx.bench_with_setup(row(name, "ijson", Work::Items(k)), &mut si, &mut oi);
-    ctx.bench_with_setup(row(name, "serde", Work::Items(k)), &mut ss, &mut os);
+    if time_serde {
+        ctx.bench_with_setup(row(name, "serde", Work::Items(k)), &mut ss, &mut os);
+    }
 }
 
 fn wants(ctx: &Ctx, name: &str) -> bool {
@@ -469,10 +488,13 @@ fn numincr(ctx: &mut Ctx, sizes: &[usize]) {
             let seed = 0x7a00_0000 + ((Kind::I8 as u64) << 24) + n as u64;
             let (a, b) = Kind::I8.base(n, seed);
             let index = n / 2;
-            case(
+            // The baseline overwrites one element whatever the length; it is
+            // timed at the small sizes only.
+            case_opt(
                 ctx,
                 &name,
                 1,
+                n <= 1024,
                 || (a.clone(), ()),
                 |(doc, _)| {
                     let arr = doc.as_array_mut().expect("array");
