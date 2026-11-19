@@ -74,9 +74,11 @@ Reports written before this rule are not rewritten.
 
 ## Measurement and source rules
 
-- **No benchmark referee exists yet.** `ijson` ships no `benches/`. The first deliverable is a
-  microbenchmark suite that mirrors the RedisJSON call paths in `docs/USAGE-PATTERN.md`. Until
-  it is reviewed and frozen, no optimisation is accepted.
+- **No frozen benchmark referee exists yet.** `bench/` covers every call path in
+  `docs/USAGE-PATTERN.md`, but its README lists blocking limits (no dedicated-machine baseline,
+  system allocator, small intern table). Until those are closed and the suite is reviewed and
+  frozen, no optimisation is accepted. Compare builds with `bench/scripts/bench.py ab` and
+  `compare`, never by reading two tables.
 - Once frozen, the benchmark suite and `ijson`'s tests and fuzz targets are the immutable
   referee during a candidate comparison. Harness fixes are separate commits followed by a
   new baseline. Never weaken a test to let a candidate pass.
