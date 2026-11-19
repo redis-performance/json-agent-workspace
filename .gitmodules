@@ -1,0 +1,9 @@
+[submodule "ijson"]
+	path = ijson
+	url = https://github.com/RedisJSON/ijson.git
+[submodule "ciborium"]
+	path = ciborium
+	url = https://github.com/RedisJSON/ciborium.git
+[submodule "RedisJSON"]
+	path = RedisJSON
+	url = https://github.com/RedisJSON/RedisJSON.git

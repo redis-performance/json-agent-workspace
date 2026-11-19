@@ -1,0 +1,9 @@
+/build/
+/target/
+/worktrees/
+/scratch/
+*.data
+*.data.old
+.DS_Store
+__pycache__/
+.claude/settings.local.json
